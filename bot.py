@@ -1,5 +1,4 @@
 import os
-import json
 import asyncio
 import logging
 from aiohttp import web
@@ -9,484 +8,434 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    InlineQueryResultVideo, InlineQueryResultArticle, InputTextMessageContent
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton
 )
 
 # --- ASOSIY SOZLAMALAR ---
 BOT_TOKEN = "8318167396:AAFwWj6MyQW-_sBSRtC3czw2D5w2lcbp3Mk"
 MAIN_ADMIN_ID = 6505655178
-DEFAULT_CHANNEL = "@FORTIS_OKTO"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# --- BAZA SOZLAMALARI ---
+# Baza (xotirada saqlanadi)
 ADMINS = [MAIN_ADMIN_ID]
-CHANNELS = [DEFAULT_CHANNEL]
-USERS = {}        # {user_id: {"username": str, "first_name": str}}
-SAVED_MOVIES = {} # {user_id: set(movie_codes)}
-BOT_ACTIVE = True
+CHANNELS = ["@FORTIS_OKTO"]
 
 # Kinolar bazasi
 MOVIES = {
-    "1001": {
-        "name_uz": "Qasoskorlar: Intiho",
-        "description": "Koinotni qutqarish uchun qahramonlarning so'nggi kurashi.",
-        "year": 2019,
+    "101": {
+        "title": "Qasoskorlar: Intiho",
+        "description": "Koinotni qutqarish uchun so'nggi kurash.",
+        "year": "2019",
         "country": "AQSH",
-        "language": "O'zbekcha",
-        "genre": "Fantastika",
-        "rating": 8.4,
-        "views": 0,
-        "video_file_id": None,
-        "poster_file_id": None
+        "genre": "Fantastika, Jangari",
+        "video_file_id": None
     }
 }
 
-# --- ADMIN HOLATLARI (FSM) ---
-class AdminStates(StatesGroup):
-    add_name = State()
-    add_desc = State()
-    add_year = State()
-    add_country = State()
-    add_lang = State()
-    add_genre = State()
-    add_code = State()
-    add_video = State()
-    add_poster = State()
-    broadcast_msg = State()
-    add_channel = State()
-    add_admin = State()
-    delete_movie = State()
+USERS_DB = {}
+BOT_ACTIVE = True
 
-# --- MAJBURIY OBUNANI TEKSHIRISH ---
+# --- HOLATLAR (FSM) ---
+class MovieAddStates(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_desc = State()
+    waiting_for_year = State()
+    waiting_for_country = State()
+    waiting_for_genre = State()
+    waiting_for_code = State()
+    waiting_for_video = State()
+
+class AdminActions(StatesGroup):
+    waiting_for_broadcast = State()
+    waiting_for_add_channel = State()
+    waiting_for_del_channel = State()
+    waiting_for_del_movie = State()
+    waiting_for_add_admin = State()
+
+# --- MENYULAR ---
+def get_user_main_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🎬 Kino izlash")],
+            [KeyboardButton(text="🔥 Top kinolar"), KeyboardButton(text="ℹ️ Bot haqida")]
+        ],
+        resize_keyboard=True
+    )
+
+def get_admin_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="➕ Kino qo'shish"), KeyboardButton(text="🗑 Kino o'chirish")],
+            [KeyboardButton(text="📢 Kanallar"), KeyboardButton(text="✉️ Xabar yuborish")],
+            [KeyboardButton(text="📊 Statistika"), KeyboardButton(text="👥 Adminlar")],
+            [KeyboardButton(text="🚪 Foydalanuvchi menyusi")]
+        ],
+        resize_keyboard=True
+    )
+
+cancel_kb = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="❌ Bekor qilish")]],
+    resize_keyboard=True
+)
+
+# --- OBUNA TEKSHIRISH TIZIMI ---
 async def check_channel_membership(user_id: int):
     unsubscribed = []
     for ch in CHANNELS:
         try:
             member = await bot.get_chat_member(chat_id=ch, user_id=user_id)
-            if member.status not in ["creator", "administrator", "member"]:
+            if member.status in ["left", "kicked"]:
                 unsubscribed.append(ch)
-        except Exception as e:
-            logging.error(f"Kanal tekshirishda xatolik ({ch}): {e}")
+        except Exception:
             unsubscribed.append(ch)
     return unsubscribed
 
 def get_sub_keyboard(unsubscribed_channels):
     buttons = []
     for i, ch in enumerate(unsubscribed_channels, 1):
-        clean_name = ch.replace("@", "")
-        buttons.append([InlineKeyboardButton(text=f"📢 {i}-kanalga a'zo bo'lish", url=f"https://t.me/{clean_name}")])
-    buttons.append([InlineKeyboardButton(text="✔️ Tekshirish", callback_data="check_subscription")])
+        clean_ch = ch.replace("@", "")
+        buttons.append([InlineKeyboardButton(text=f"📢 {i}-kanalga a'zo bo'lish", url=f"https://t.me/{clean_ch}")])
+    buttons.append([InlineKeyboardButton(text="✅ Tekshirish", callback_data="check_subscription")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# --- MENYULAR ---
-def get_main_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔥 Top Filmlar", switch_inline_query_current_chat="top")],
-            [InlineKeyboardButton(text="💾 Saqlangan Filmlar", switch_inline_query_current_chat="saved")],
-            [InlineKeyboardButton(text="🔍 Film Qidirish", switch_inline_query_current_chat="")],
-            [InlineKeyboardButton(text="🎬 Filter", callback_data="filter_main")]
-        ]
-    )
-
-def get_admin_keyboard():
-    status_text = "✅ Faol" if BOT_ACTIVE else "❌ O'chiq"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Kino Qo'shish", callback_data="admin_add_movie")],
-            [InlineKeyboardButton(text="🗑 Kino O'chirish", callback_data="admin_delete_movie")],
-            [InlineKeyboardButton(text="📊 Statistika", callback_data="admin_stats")],
-            [InlineKeyboardButton(text="📢 Xabar Yuborish", callback_data="admin_broadcast")],
-            [InlineKeyboardButton(text="📱 Kanallar", callback_data="admin_channels")],
-            [InlineKeyboardButton(text="👥 Adminlar", callback_data="admin_manage_admins")],
-            [InlineKeyboardButton(text=f"⚙️ Bot Holati: {status_text}", callback_data="admin_toggle_bot")],
-            [InlineKeyboardButton(text="🔙 Asosiy Menu", callback_data="main_menu")]
-        ]
-    )
-
-def get_movie_keyboard(code: str, user_id: int):
-    is_saved = code in SAVED_MOVIES.get(user_id, set())
-    save_text = "❌ Saqlanganlardan O'chirish" if is_saved else "💾 Saqlash"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📤 Ulashish", switch_inline_query=code)],
-            [InlineKeyboardButton(text=save_text, callback_data=f"save_{code}")],
-            [
-                InlineKeyboardButton(text="🔍 Qidirish", switch_inline_query_current_chat=""),
-                InlineKeyboardButton(text="🔙 Asosiy Menu", callback_data="main_menu")
-            ]
-        ]
-    )
-
-# --- START BUYRUG'I ---
+# --- FOYDALANUVCHI HANDLERLARI ---
 @dp.message(CommandStart())
-async def handle_start(message: types.Message, state: FSMContext):
+async def start_handler(message: types.Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
-    USERS[user_id] = {
-        "username": message.from_user.username or "",
-        "first_name": message.from_user.first_name or ""
-    }
+    if user_id not in USERS_DB:
+        USERS_DB[user_id] = {
+            "first_name": message.from_user.first_name,
+            "username": message.from_user.username
+        }
 
-    if not BOT_ACTIVE and user_id not in ADMINS:
-        await message.answer("❌ Botda hozirda texnik ishlar olib borilmoqda. Keyinroq urinib ko'ring.")
-        return
-
+    # Obunani tekshirish
     unsub = await check_channel_membership(user_id)
     if unsub and user_id not in ADMINS:
-        await message.answer(
+        text = (
             f"👋 Assalomu alaykum, <b>{message.from_user.first_name}</b>!\n\n"
-            "❗️ <b>Botdan to'liq foydalanish uchun quyidagi kanallarga a'zo bo'lishingiz kerak:</b>",
-            reply_markup=get_sub_keyboard(unsub),
-            parse_mode="HTML"
+            "❗️ <b>Botdan to'liq foydalanish uchun quyidagi kanallarga a'zo bo'ling:</b>"
         )
+        await message.answer(text, reply_markup=get_sub_keyboard(unsub), parse_mode="HTML")
         return
 
-    # /start 1001 ko'rinishida havola orqali ochilganda
-    args = message.text.split()
-    if len(args) > 1:
-        code = args[1].strip()
-        if code in MOVIES:
-            await send_movie(message.chat.id, code, user_id)
-            return
-
-    await message.answer(
+    text = (
         f"👋 Assalomu alaykum, <b>{message.from_user.first_name}</b>!\n\n"
-        "🎬 <b>Kino botga xush kelibsiz!</b>\n\nQuyidagi tugmalardan foydalaning:",
-        reply_markup=get_main_keyboard(),
-        parse_mode="HTML"
+        "🎬 <b>Kino Olami</b> botiga xush kelibsiz!\n"
+        "🍿 Kino kodini yuboring (masalan: <code>101</code>):"
     )
+    await message.answer(text, reply_markup=get_user_main_kb(), parse_mode="HTML")
 
 @dp.callback_query(F.data == "check_subscription")
-async def process_sub_check(callback: types.CallbackQuery):
-    unsub = await check_channel_membership(callback.from_user.id)
+async def verify_sub(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    unsub = await check_channel_membership(user_id)
     if unsub:
-        await callback.answer("❌ Siz hali barcha kanallarga obuna bo'lmadingiz!", show_alert=True)
-        try:
-            await callback.message.edit_reply_markup(reply_markup=get_sub_keyboard(unsub))
-        except Exception:
-            pass
+        await callback.answer("❌ Hali hamma kanallarga a'zo bo'lmadingiz!", show_alert=True)
+        await callback.message.edit_reply_markup(reply_markup=get_sub_keyboard(unsub))
     else:
-        await callback.answer("✅ Obuna tasdiqlandi!")
+        await callback.answer("✅ Rahmat, a'zolik tasdiqlandi!")
         try:
             await callback.message.delete()
         except Exception:
             pass
         await callback.message.answer(
-            "👋 Assalomu alaykum!\n\n🎬 <b>Kino botga xush kelibsiz!</b>\n\nQuyidagi tugmalardan foydalaning:",
-            reply_markup=get_main_keyboard(),
+            "🎉 <b>A'zolik tasdiqlandi!</b>\n\nKino kodini yuboring:",
+            reply_markup=get_user_main_kb(),
             parse_mode="HTML"
         )
 
-# --- ADMIN PANEL ---
+@dp.message(F.text == "❌ Bekor qilish")
+async def cancel_action(message: types.Message, state: FSMContext):
+    await state.clear()
+    if message.from_user.id in ADMINS:
+        await message.answer("Amal bekor qilindi.", reply_markup=get_admin_kb())
+    else:
+        await message.answer("Amal bekor qilindi.", reply_markup=get_user_main_kb())
+
 @dp.message(Command("admin"))
-async def handle_admin(message: types.Message, state: FSMContext):
+async def admin_panel(message: types.Message, state: FSMContext):
     await state.clear()
     if message.from_user.id not in ADMINS:
         return
-    await message.answer("👨‍💼 <b>Admin Panel</b>\n\nKerakli bo'limni tanlang:", reply_markup=get_admin_keyboard(), parse_mode="HTML")
+    await message.answer("👨‍💼 <b>Admin paneliga xush kelibsiz!</b>", reply_markup=get_admin_kb(), parse_mode="HTML")
 
-@dp.callback_query(F.data == "admin_panel")
-async def back_to_admin(callback: types.CallbackQuery, state: FSMContext):
+@dp.message(F.text == "🚪 Foydalanuvchi menyusi")
+async def back_user_kb(message: types.Message, state: FSMContext):
     await state.clear()
-    if callback.from_user.id not in ADMINS:
+    await message.answer("Foydalanuvchi menyusi:", reply_markup=get_user_main_kb())
+
+# --- STATISTIKA ---
+@dp.message(F.text == "📊 Statistika")
+async def show_stats(message: types.Message):
+    if message.from_user.id not in ADMINS:
         return
-    await callback.message.edit_text("👨‍💼 <b>Admin Panel</b>\n\nKerakli bo'limni tanlang:", reply_markup=get_admin_keyboard(), parse_mode="HTML")
-    await callback.answer()
+    text = (
+        "📊 <b>Bot Statistikasi:</b>\n\n"
+        f"👥 Foydalanuvchilar: <b>{len(USERS_DB)}</b> ta\n"
+        f"🎬 Kinolar soni: <b>{len(MOVIES)}</b> ta\n"
+        f"📢 Ulanish kanallari: <b>{len(CHANNELS)}</b> ta\n"
+        f"👤 Adminlar soni: <b>{len(ADMINS)}</b> ta"
+    )
+    await message.answer(text, parse_mode="HTML")
 
-@dp.callback_query(F.data == "main_menu")
-async def back_to_main(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.answer("🏠 <b>Asosiy Menu</b>\n\nKerakli bo'limni tanlang:", reply_markup=get_main_keyboard(), parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "admin_toggle_bot")
-async def toggle_bot_active(callback: types.CallbackQuery):
-    global BOT_ACTIVE
-    if callback.from_user.id not in ADMINS:
+# --- KINO QO'SHISH (BOSQICHMA-BOSQICH) ---
+@dp.message(F.text == "➕ Kino qo'shish")
+async def start_add_movie(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMINS:
         return
-    BOT_ACTIVE = not BOT_ACTIVE
-    status = "yoqildi" if BOT_ACTIVE else "o'chirildi"
-    await callback.answer(f"Bot holati o'zgartirildi: {status}")
-    await callback.message.edit_reply_markup(reply_markup=get_admin_keyboard())
+    await message.answer("🎬 <b>Film nomini kiriting:</b>", reply_markup=cancel_kb, parse_mode="HTML")
+    await state.set_state(MovieAddStates.waiting_for_name)
 
-# --- KINO QO'SHISH BOSQICHLARI ---
-@dp.callback_query(F.data == "admin_add_movie")
-async def add_movie_start(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in ADMINS:
-        return
-    await callback.message.answer("🎬 <b>Kino qo'shish</b>\n\n📝 Film nomini kiriting:", parse_mode="HTML")
-    await state.set_state(AdminStates.add_name)
-    await callback.answer()
-
-@dp.message(AdminStates.add_name)
+@dp.message(MovieAddStates.waiting_for_name)
 async def process_name(message: types.Message, state: FSMContext):
-    await state.update_data(name_uz=message.text.strip())
-    await message.answer("📝 Film tavsifini kiriting:")
-    await state.set_state(AdminStates.add_desc)
+    await state.update_data(name=message.text.strip())
+    await message.answer("📝 <b>Film tavsifini (qisqacha mazmunini) kiriting:</b>", parse_mode="HTML")
+    await state.set_state(MovieAddStates.waiting_for_desc)
 
-@dp.message(AdminStates.add_desc)
+@dp.message(MovieAddStates.waiting_for_desc)
 async def process_desc(message: types.Message, state: FSMContext):
     await state.update_data(description=message.text.strip())
-    await message.answer("📅 Chiqarilgan yilini kiriting (masalan: 2024):")
-    await state.set_state(AdminStates.add_year)
+    await message.answer("📅 <b>Chiqarilgan yilini kiriting (masalan: 2024):</b>", parse_mode="HTML")
+    await state.set_state(MovieAddStates.waiting_for_year)
 
-@dp.message(AdminStates.add_year)
+@dp.message(MovieAddStates.waiting_for_year)
 async def process_year(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        await message.answer("❌ Iltimos, to'g'ri yil kiriting:")
-        return
-    await state.update_data(year=int(message.text))
-    await message.answer("🌍 Ishlab chiqarilgan davlatni kiriting:")
-    await state.set_state(AdminStates.add_country)
+    await state.update_data(year=message.text.strip())
+    await message.answer("🌍 <b>Davlatini kiriting (masalan: AQSH, O'zbekiston):</b>", parse_mode="HTML")
+    await state.set_state(MovieAddStates.waiting_for_country)
 
-@dp.message(AdminStates.add_country)
+@dp.message(MovieAddStates.waiting_for_country)
 async def process_country(message: types.Message, state: FSMContext):
     await state.update_data(country=message.text.strip())
-    await message.answer("🗣 Tilini kiriting (masalan: O'zbekcha):")
-    await state.set_state(AdminStates.add_lang)
+    await message.answer("🎭 <b>Janrini kiriting (masalan: Jangari, Komediya):</b>", parse_mode="HTML")
+    await state.set_state(MovieAddStates.waiting_for_genre)
 
-@dp.message(AdminStates.add_lang)
-async def process_lang(message: types.Message, state: FSMContext):
-    await state.update_data(language=message.text.strip())
-    await message.answer("🎭 Janrini kiriting (masalan: Jangari):")
-    await state.set_state(AdminStates.add_genre)
-
-@dp.message(AdminStates.add_genre)
+@dp.message(MovieAddStates.waiting_for_genre)
 async def process_genre(message: types.Message, state: FSMContext):
     await state.update_data(genre=message.text.strip())
-    await message.answer("🔢 Kino uchun noyob kod kiriting (masalan: <code>1002</code>):", parse_mode="HTML")
-    await state.set_state(AdminStates.add_code)
+    await message.answer("🔢 <b>Kino uchun raqamli kod kiriting (masalan: 105):</b>", parse_mode="HTML")
+    await state.set_state(MovieAddStates.waiting_for_code)
 
-@dp.message(AdminStates.add_code)
+@dp.message(MovieAddStates.waiting_for_code)
 async def process_code(message: types.Message, state: FSMContext):
     code = message.text.strip()
     if code in MOVIES:
-        await message.answer("❌ Bu kod allaqachon mavjud! Boshqa kod kiriting:")
+        await message.answer("❌ Bu kodli kino bazada bor! Boshqa kod kiriting:")
         return
     await state.update_data(code=code)
-    await message.answer("🎥 Kinoning video faylini yuboring:")
-    await state.set_state(AdminStates.add_video)
+    await message.answer("🎥 <b>Endi kinoning video faylini yuboring:</b>\n<i>(Agar video bo'lmasa, 'yoq' deb yozishingiz mumkin)</i>", parse_mode="HTML")
+    await state.set_state(MovieAddStates.waiting_for_video)
 
-@dp.message(AdminStates.add_video)
+@dp.message(MovieAddStates.waiting_for_video)
 async def process_video(message: types.Message, state: FSMContext):
-    if not message.video:
-        await message.answer("❌ Iltimos, video fayl yuboring!")
-        return
-    await state.update_data(video_file_id=message.video.file_id)
-    await message.answer("🖼 Poster rasmini yuboring (yoki rasmsiz bo'lsa 'yoq' deb yozing):")
-    await state.set_state(AdminStates.add_poster)
-
-@dp.message(AdminStates.add_poster)
-async def process_poster(message: types.Message, state: FSMContext):
-    poster_id = message.photo[-1].file_id if message.photo else None
     data = await state.get_data()
-    code = data["code"]
+    v_id = message.video.file_id if message.video else None
 
-    MOVIES[code] = {
-        "name_uz": data["name_uz"],
+    MOVIES[data["code"]] = {
+        "title": data["name"],
         "description": data["description"],
         "year": data["year"],
         "country": data["country"],
-        "language": data["language"],
         "genre": data["genre"],
-        "rating": 8.0,
-        "views": 0,
-        "video_file_id": data["video_file_id"],
-        "poster_file_id": poster_id
+        "video_file_id": v_id
     }
 
     await message.answer(
-        f"✅ <b>Kino muvaffaqiyatli qo'shildi!</b>\n\n"
-        f"🎬 <b>Nom:</b> {data['name_uz']}\n"
-        f"🔢 <b>Kod:</b> <code>{code}</code>",
-        reply_markup=get_admin_keyboard(),
+        f"✅ <b>Kino muvaffaqiyatli saqlandi!</b>\n\n"
+        f"🎬 <b>Nom:</b> {data['name']}\n"
+        f"🔢 <b>Kodi:</b> <code>{data['code']}</code>\n"
+        f"📅 <b>Yili:</b> {data['year']}",
+        reply_markup=get_admin_kb(),
         parse_mode="HTML"
     )
     await state.clear()
 
 # --- KINO O'CHIRISH ---
-@dp.callback_query(F.data == "admin_delete_movie")
-async def delete_movie_start(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in ADMINS:
+@dp.message(F.text == "🗑 Kino o'chirish")
+async def delete_movie_start(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMINS:
         return
-    await callback.message.answer("🗑 O'chirmoqchi bo'lgan kino kodini kiriting:")
-    await state.set_state(AdminStates.delete_movie)
-    await callback.answer()
+    await message.answer("O'chirmoqchi bo'lgan kino kodini kiriting:", reply_markup=cancel_kb)
+    await state.set_state(AdminActions.waiting_for_del_movie)
 
-@dp.message(AdminStates.delete_movie)
+@dp.message(AdminActions.waiting_for_del_movie)
 async def delete_movie_finish(message: types.Message, state: FSMContext):
     code = message.text.strip()
     if code in MOVIES:
-        name = MOVIES[code]["name_uz"]
         del MOVIES[code]
-        await message.answer(f"✅ <b>{name}</b> kinosi o'chirildi!", reply_markup=get_admin_keyboard(), parse_mode="HTML")
+        await message.answer(f"✅ {code} kodli kino muvaffaqiyatli o'chirildi!", reply_markup=get_admin_kb())
     else:
-        await message.answer("❌ Bunday kodli kino topilmadi.", reply_markup=get_admin_keyboard())
+        await message.answer("❌ Bunday kodli kino topilmadi.", reply_markup=get_admin_kb())
     await state.clear()
 
-# --- STATISTIKA ---
-@dp.callback_query(F.data == "admin_stats")
-async def show_stats(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMINS:
+# --- KANALLARNI SOZLASH ---
+@dp.message(F.text == "📢 Kanallar")
+async def show_channels(message: types.Message):
+    if message.from_user.id not in ADMINS:
         return
-    total_users = len(USERS)
-    total_movies = len(MOVIES)
-    total_views = sum(m.get("views", 0) for m in MOVIES.values())
-    text = (
-        "📊 <b>Statistika</b>\n\n"
-        f"👥 Jami foydalanuvchilar: <b>{total_users}</b>\n"
-        f"🎬 Jami kinolar: <b>{total_movies}</b>\n"
-        f"👀 Jami ko'rishlar: <b>{total_views}</b>\n"
-        f"📢 Kanallar: <b>{len(CHANNELS)}</b>\n"
-        f"👤 Adminlar: <b>{len(ADMINS)}</b>"
-    )
-    await callback.message.edit_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[[InlineKeyboardButton(text="🔙 Orqaga", callback_data="admin_panel")]]]),
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-# --- KANALLAR BOSHQARUVI ---
-@dp.callback_query(F.data == "admin_channels")
-async def list_channels(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMINS:
-        return
-    ch_list = "\n".join([f"• <code>{c}</code>" for c in CHANNELS]) if CHANNELS else "Kanallar mavjud emas."
+    ch_list = "\n".join([f"• {c}" for c in CHANNELS]) if CHANNELS else "Kanallar yo'q."
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Kanal Qo'shish", callback_data="admin_add_ch")],
-            [InlineKeyboardButton(text="🗑 Kanallarni O'chirish", callback_data="admin_clear_ch")],
-            [InlineKeyboardButton(text="🔙 Orqaga", callback_data="admin_panel")]
+            [InlineKeyboardButton(text="➕ Kanal qo'shish", callback_data="add_ch")],
+            [InlineKeyboardButton(text="🗑 Kanal o'chirish", callback_data="del_ch")]
         ]
     )
-    await callback.message.edit_text(f"📱 <b>Majburiy kanallar ro'yxati:</b>\n\n{ch_list}", reply_markup=kb, parse_mode="HTML")
+    await message.answer(f"📢 <b>Majburiy kanallar:</b>\n\n{ch_list}", reply_markup=kb, parse_mode="HTML")
+
+@dp.callback_query(F.data == "add_ch")
+async def call_add_ch(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.answer("Kanal usernamesini @ belgisi bilan yuboring (Masalan: @kanal):", reply_markup=cancel_kb)
+    await state.set_state(AdminActions.waiting_for_add_channel)
     await callback.answer()
 
-@dp.callback_query(F.data == "admin_add_ch")
-async def add_channel_start(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("Kanal manzilini @ belgisi bilan yuboring (Masalan: @kanal):")
-    await state.set_state(AdminStates.add_channel)
-    await callback.answer()
-
-@dp.message(AdminStates.add_channel)
-async def add_channel_finish(message: types.Message, state: FSMContext):
+@dp.message(AdminActions.waiting_for_add_channel)
+async def process_add_ch(message: types.Message, state: FSMContext):
     ch = message.text.strip()
     if ch.startswith("@") and ch not in CHANNELS:
         CHANNELS.append(ch)
-        await message.answer(f"✅ {ch} kanali qo'shildi!", reply_markup=get_admin_keyboard())
+        await message.answer(f"✅ {ch} kanali ulandi!", reply_markup=get_admin_kb())
     else:
-        await message.answer("Xatolik yoki kanal allaqachon mavjud.", reply_markup=get_admin_keyboard())
+        await message.answer("Xatolik yoki kanal mavjud.", reply_markup=get_admin_kb())
     await state.clear()
 
-@dp.callback_query(F.data == "admin_clear_ch")
-async def clear_channels(callback: types.CallbackQuery):
-    CHANNELS.clear()
-    CHANNELS.append(DEFAULT_CHANNEL)
-    await callback.message.answer("🗑 Kanallar tozalandi (asosiy kanal qoldi).", reply_markup=get_admin_keyboard())
+@dp.callback_query(F.data == "del_ch")
+async def call_del_ch(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.answer("O'chirmoqchi bo'lgan kanal usernamesini kiriting:", reply_markup=cancel_kb)
+    await state.set_state(AdminActions.waiting_for_del_channel)
     await callback.answer()
+
+@dp.message(AdminActions.waiting_for_del_channel)
+async def process_del_ch(message: types.Message, state: FSMContext):
+    ch = message.text.strip()
+    if ch in CHANNELS:
+        CHANNELS.remove(ch)
+        await message.answer(f"✅ {ch} o'chirildi!", reply_markup=get_admin_kb())
+    else:
+        await message.answer("Bunday kanal topilmadi.", reply_markup=get_admin_kb())
+    await state.clear()
 
 # --- ADMINLAR BOSHQARUVI ---
-@dp.callback_query(F.data == "admin_manage_admins")
-async def list_admins(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMINS:
+@dp.message(F.text == "👥 Adminlar")
+async def manage_admins(message: types.Message):
+    if message.from_user.id not in ADMINS:
         return
-    adm_text = "\n".join([f"• <code>{a}</code>" + (" 👑" if a == MAIN_ADMIN_ID else "") for a in ADMINS])
+    adm_text = "\n".join([f"• <code>{a}</code>" for a in ADMINS])
     kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Admin Qo'shish", callback_data="admin_add_admin")],
-            [InlineKeyboardButton(text="🔙 Orqaga", callback_data="admin_panel")]
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text="➕ Admin qo'shish", callback_data="add_admin")]]
     )
-    await callback.message.edit_text(f"👥 <b>Adminlar:</b>\n\n{adm_text}", reply_markup=kb, parse_mode="HTML")
+    await message.answer(f"👥 <b>Adminlar ro'yxati:</b>\n\n{adm_text}", reply_markup=kb, parse_mode="HTML")
+
+@dp.callback_query(F.data == "add_admin")
+async def add_admin_call(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.answer("Yangi adminning Telegram ID raqamini yuboring:", reply_markup=cancel_kb)
+    await state.set_state(AdminActions.waiting_for_add_admin)
     await callback.answer()
 
-@dp.callback_query(F.data == "admin_add_admin")
-async def add_admin_start(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("Yangi adminning Telegram ID raqamini yuboring:")
-    await state.set_state(AdminStates.add_admin)
-    await callback.answer()
-
-@dp.message(AdminStates.add_admin)
-async def add_admin_finish(message: types.Message, state: FSMContext):
-    if message.text.isdigit():
-        new_id = int(message.text)
+@dp.message(AdminActions.waiting_for_add_admin)
+async def process_admin_add(message: types.Message, state: FSMContext):
+    if message.text.strip().isdigit():
+        new_id = int(message.text.strip())
         if new_id not in ADMINS:
             ADMINS.append(new_id)
-            await message.answer(f"✅ ID {new_id} admin qilindi!", reply_markup=get_admin_keyboard())
+            await message.answer(f"✅ {new_id} admin qilindi!", reply_markup=get_admin_kb())
         else:
-            await message.answer("Bu foydalanuvchi allaqachon admin.", reply_markup=get_admin_keyboard())
+            await message.answer("Ushbu foydalanuvchi allaqachon admin.", reply_markup=get_admin_kb())
     else:
-        await message.answer("Faqat raqam kiriting.", reply_markup=get_admin_keyboard())
+        await message.answer("Faqat raqam kiriting.", reply_markup=get_admin_kb())
     await state.clear()
 
-# --- XABAR TARQATISH (BROADCAST) ---
-@dp.callback_query(F.data == "admin_broadcast")
-async def broadcast_start(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("Barcha foydalanuvchilarga yuboriladigan xabarni yuboring:")
-    await state.set_state(AdminStates.broadcast_msg)
-    await callback.answer()
+# --- XABAR YUBORISH (RASSILKA) ---
+@dp.message(F.text == "✉️ Xabar yuborish")
+async def start_broadcast(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMINS:
+        return
+    await message.answer("Barcha a'zolarga yuboriladigan xabarni (matn, rasm, video) yuboring:", reply_markup=cancel_kb)
+    await state.set_state(AdminActions.waiting_for_broadcast)
 
-@dp.message(AdminStates.broadcast_msg)
-async def broadcast_finish(message: types.Message, state: FSMContext):
+@dp.message(AdminActions.waiting_for_broadcast)
+async def broadcast_send(message: types.Message, state: FSMContext):
     sent = 0
     await message.answer("Xabar tarqatish boshlandi...")
-    for uid in list(USERS.keys()):
+    for uid in list(USERS_DB.keys()):
         try:
             await message.send_copy(chat_id=uid)
             sent += 1
             await asyncio.sleep(0.05)
         except Exception:
             pass
-    await message.answer(f"✅ Xabar {sent} ta foydalanuvchiga yuborildi!", reply_markup=get_admin_keyboard())
+    await message.answer(f"✅ Xabar {sent} ta foydalanuvchiga yuborildi!", reply_markup=get_admin_kb())
     await state.clear()
 
-# --- SAQLANGAN KINOLAR (FAVORITES) ---
-@dp.callback_query(F.data.startswith("save_"))
-async def toggle_save_movie(callback: types.CallbackQuery):
-    code = callback.data.split("_")[1]
-    user_id = callback.from_user.id
-    if user_id not in SAVED_MOVIES:
-        SAVED_MOVIES[user_id] = set()
+# --- KINO IZLASH VA KOD ORQALI OLISH ---
+@dp.message(F.text.regexp(r'^\d+$'))
+async def send_movie_by_code(message: types.Message):
+    user_id = message.from_user.id
+    
+    # Obunani tekshirish
+    unsub = await check_channel_membership(user_id)
+    if unsub and user_id not in ADMINS:
+        await message.answer(
+            "⚠️ Kinoni olishdan oldin kanallarga a'zo bo'ling:",
+            reply_markup=get_sub_keyboard(unsub)
+        )
+        return
 
-    if code in SAVED_MOVIES[user_id]:
-        SAVED_MOVIES[user_id].remove(code)
-        await callback.answer("❌ Saqlanganlardan o'chirildi")
+    code = message.text.strip()
+    if code in MOVIES:
+        m = MOVIES[code]
+        card = (
+            f"🎬 <b>Film nomi:</b> {m['title']}\n"
+            f"📝 <b>Tavsif:</b> {m.get('description', 'Mavjud emas')}\n"
+            f"📅 <b>Yili:</b> {m.get('year', 'Noma\'lum')}\n"
+            f"🌍 <b>Davlat:</b> {m.get('country', 'Noma\'lum')}\n"
+            f"🎭 <b>Janr:</b> {m.get('genre', 'Noma\'lum')}\n"
+            f"🔢 <b>Kodi:</b> <code>{code}</code>\n\n"
+            f"📢 <b>Kanal:</b> @FORTIS_OKTO"
+        )
+        if m.get("video_file_id"):
+            await message.answer_video(video=m["video_file_id"], caption=card, parse_mode="HTML")
+        else:
+            await message.answer(card, parse_mode="HTML")
     else:
-        SAVED_MOVIES[user_id].add(code)
-        await callback.answer("✅ Saqlandi!")
+        await message.answer(f"❌ <b>{code}</b> raqamli kino topilmadi.")
 
-    try:
-        await callback.message.edit_reply_markup(reply_markup=get_movie_keyboard(code, user_id))
-    except Exception:
-        pass
+@dp.message(F.text == "🎬 Kino izlash")
+async def search_movie_hint(message: types.Message):
+    await message.answer("🍿 Kinoni tomosha qilish uchun uning kodini yuboring (masalan: <code>101</code>).", parse_mode="HTML")
 
-# --- KINONI FOYDALANUVCHIGA YUBORISH ---
-async def send_movie(chat_id: int, code: str, user_id: int):
-    m = MOVIES[code]
-    m["views"] = m.get("views", 0) + 1
+@dp.message(F.text == "🔥 Top kinolar")
+async def top_movies_list(message: types.Message):
+    text = "🔥 <b>Hozirgi mashhur kinolar:</b>\n\n"
+    for code, m in list(MOVIES.items())[:5]:
+        text += f"• <code>{code}</code> — {m['title']} ({m.get('year', '')})\n"
+    await message.answer(text, parse_mode="HTML")
 
-    caption = (
-        f"🎬 <b>{m['name_uz']}</b>\n\n"
-        f"📝 {m['description']}\n\n"
-        f"📅 Yil: {m['year']}\n"
-        f"🌍 Davlat: {m['country']}\n"
-        f"🗣 Til: {m['language']}\n"
-        f"🎭 Janr: {m['genre']}\n"
-        f"⭐️ Reyting: {m['rating']}/10\n"
-        f"👀 Ko'rishlar: {m['views']}\n\n"
-        f"🔢 Kod: <code>{code}</code>"
-    )
+@dp.message(F.text == "ℹ️ Bot haqida")
+async def about_bot(message: types.Message):
+    await message.answer("🎬 <b>Kino Olami | Premyeralar</b>\nEng so'nggi va sara filmlar to'plami!", parse_mode="HTML")
 
-    kb = get_movie_keyboard(code, user_id)
-    if m.get("video_file_id"):
-        await bot.send_video(chat_id=chat_id, video=m["video_file_id"], caption=caption, reply_markup=kb, parse_mode="HTML")
-    elif m.get("poster_file_id"):
-        await bot.send_photo(chat_id=chat_id, photo=m["poster_file_id"], caption=caption, reply_markup=kb, parse_mode="HTML")
-    else:
-        await bot.send_message(chat_id=chat_id, text=caption, reply_markup=kb, parse_mo
+# --- RENDER PORTI UCHUN SERVER ---
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+async def main():
+    await start_web_server()
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+    
