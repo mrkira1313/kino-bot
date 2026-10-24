@@ -452,3 +452,24 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+# --- RENDER PORTI UCHUN SERVER ---
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
+
+async def main():
+    # Veb-serverni fonda ishga tushirish
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    
+    # Bot polling
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+    
