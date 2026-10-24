@@ -1,5 +1,7 @@
+import os
 import asyncio
 import logging
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
@@ -15,7 +17,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Bot sozlamalari
 BOT_SETTINGS = {
     "active": True,
     "currency": "so'm",
@@ -26,7 +27,6 @@ BOT_SETTINGS = {
 ADMINS = [SUPER_ADMIN]
 CHANNELS = ["@FORTIS_OKTO"]
 
-# Filmlar bazasi
 MOVIES = {
     "101": {"title": "Qasoskorlar: Intiho", "genre": "Fantastika, Jangari", "year": "2019"},
     "102": {"title": "Avatar: Suv yo'li", "genre": "Fantastika, Sarguzasht", "year": "2022"},
@@ -35,9 +35,7 @@ MOVIES = {
 
 USERS_DB = {}
 
-# --- MENYULAR (KEYBOARDS) ---
-
-# Foydalanuvchi asosiy menyusi
+# --- MENYULAR ---
 user_main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🎬 Kino izlash")],
@@ -48,7 +46,6 @@ user_main_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Admin asosiy menyusi
 admin_main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔎 Foydalanuvchini boshqarish")],
@@ -60,7 +57,6 @@ admin_main_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Qidiruv turlari inline menyusi
 search_inline_kb = InlineKeyboardMarkup(
     inline_keyboard=[
         [InlineKeyboardButton(text="🏷 Kino nomi orqali", callback_data="search_name"),
@@ -74,7 +70,6 @@ search_inline_kb = InlineKeyboardMarkup(
     ]
 )
 
-# VIP paketlar
 vip_inline_kb = InlineKeyboardMarkup(
     inline_keyboard=[
         [InlineKeyboardButton(text="💎 30 kun - 25 000 so'm", callback_data="buy_vip_30")],
@@ -84,7 +79,6 @@ vip_inline_kb = InlineKeyboardMarkup(
 )
 
 # --- HANDLERLAR ---
-
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message):
     u_id = message.from_user.id
@@ -105,7 +99,6 @@ async def admin_cmd(message: types.Message):
         return
     await message.answer("🛠 <b>Admin paneliga xush kelibsiz!</b>", reply_markup=admin_main_kb, parse_mode="HTML")
 
-# Foydalanuvchi bo'limlari
 @dp.message(F.text == "🎬 Kino izlash")
 async def handle_search_btn(message: types.Message):
     await message.answer("<b>Qidiruv tipini tanlang :</b>", reply_markup=search_inline_kb, parse_mode="HTML")
@@ -161,7 +154,6 @@ async def handle_promo_btn(message: types.Message):
 async def back_to_user(message: types.Message):
     await message.answer("Asosiy menyu:", reply_markup=user_main_kb)
 
-# Admin bo'limlari
 @dp.message(F.text == "📊 Statistika")
 async def admin_stat(message: types.Message):
     if message.from_user.id not in ADMINS: return
@@ -179,7 +171,6 @@ async def admin_state(message: types.Message):
     holat = "Yoqilgan ✅" if BOT_SETTINGS["active"] else "To'xtatilgan ⛔️"
     await message.answer(f"🤖 <b>Bot holati:</b> {holat}", parse_mode="HTML")
 
-# Kod orqali qidiruv
 @dp.message(F.text.regexp(r'^\d+$'))
 async def find_movie(message: types.Message):
     code = message.text.strip()
@@ -202,11 +193,26 @@ async def find_movie(message: types.Message):
     else:
         await message.answer(f"❌ <b>{code}</b> raqamli kino topilmadi.")
 
+# --- RENDER UCHUN SOXTA VEB-SERVER (PORTNI OCHISH) ---
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Web server started on port {port}")
+
 # --- ISHGA TUSHIRISH ---
 async def main():
+    await start_web_server()
     print("Bot muvaffaqiyatli ishga tushdi!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-  
+    
