@@ -20,7 +20,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Baza sozlamalari
 ADMINS = [MAIN_ADMIN_ID]
 CHANNELS = ["@FORTIS_OKTO"]
 
@@ -80,15 +79,16 @@ cancel_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# --- MAJBURIY OBUNA TEKSHIRUVI ---
+# --- MAJBURIY OBUNANI TEKSHIRISH ---
 async def check_channel_membership(user_id: int):
     unsubscribed = []
     for ch in CHANNELS:
         try:
             member = await bot.get_chat_member(chat_id=ch, user_id=user_id)
-            if member.status in ["left", "kicked"]:
+            if member.status not in ["creator", "administrator", "member"]:
                 unsubscribed.append(ch)
-        except Exception:
+        except Exception as e:
+            logging.error(f"Kanal tekshirishda xatolik ({ch}): {e}")
             unsubscribed.append(ch)
     return unsubscribed
 
@@ -111,13 +111,13 @@ async def start_handler(message: types.Message, state: FSMContext):
             "username": message.from_user.username
         }
 
-    # Obunani tekshirish
+    # Barcha uchun qat'iy tekshiruv
     unsub = await check_channel_membership(user_id)
-    if unsub and user_id not in ADMINS:
+    if unsub:
         text = (
             f"👋 Assalomu alaykum, <b>{message.from_user.first_name}</b>!\n\n"
-            "⚠️ <b>Botdan foydalanish uchun quyidagi homiy kanallarga obuna bo'lishingiz majburiy!</b>\n\n"
-            "<i>Kanallarga a'zo bo'lib, pastdagi «✅ TEKSHIRISH» tugmasini bosing:</i>"
+            "⚠️ <b>Botdan to'liq foydalanish uchun quyidagi homiy kanal(lar)ga a'zo bo'lishingiz majburiy!</b>\n\n"
+            "<i>A'zo bo'lgach, «✅ TEKSHIRISH» tugmasini bosing:</i>"
         )
         await message.answer(text, reply_markup=get_sub_keyboard(unsub), parse_mode="HTML")
         return
@@ -136,7 +136,10 @@ async def verify_sub(callback: types.CallbackQuery):
     unsub = await check_channel_membership(user_id)
     if unsub:
         await callback.answer("❌ Hali hamma kanallarga a'zo bo'lmadingiz! Iltimos, a'zo bo'ling.", show_alert=True)
-        await callback.message.edit_reply_markup(reply_markup=get_sub_keyboard(unsub))
+        try:
+            await callback.message.edit_reply_markup(reply_markup=get_sub_keyboard(unsub))
+        except Exception:
+            pass
     else:
         await callback.answer("✅ Rahmat, a'zolik tasdiqlandi!")
         try:
@@ -144,19 +147,10 @@ async def verify_sub(callback: types.CallbackQuery):
         except Exception:
             pass
         await callback.message.answer(
-            "🎉 <b>A'zolik tasdiqlandi!</b>\n\nMarhamat, kino kodini yuboring:",
+            "🎉 <b>A'zolik tasdiqlandi!</b>\n\nMarhamat, kino kodini yuboring (masalan: <code>101</code>):",
             reply_markup=get_user_main_kb(),
             parse_mode="HTML"
         )
-
-# --- BEKOR QILISH ---
-@dp.message(F.text == "❌ Bekor qilish")
-async def cancel_action(message: types.Message, state: FSMContext):
-    await state.clear()
-    if message.from_user.id in ADMINS:
-        await message.answer("Amal bekor qilindi.", reply_markup=get_admin_kb())
-    else:
-        await message.answer("Amal bekor qilindi.", reply_markup=get_user_main_kb())
 
 # --- ADMIN PANEL ---
 @dp.message(Command("admin"))
@@ -165,6 +159,14 @@ async def admin_panel(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMINS:
         return
     await message.answer("👨‍💼 <b>Admin paneliga xush kelibsiz!</b>", reply_markup=get_admin_kb(), parse_mode="HTML")
+
+@dp.message(F.text == "❌ Bekor qilish")
+async def cancel_action(message: types.Message, state: FSMContext):
+    await state.clear()
+    if message.from_user.id in ADMINS:
+        await message.answer("Amal bekor qilindi.", reply_markup=get_admin_kb())
+    else:
+        await message.answer("Amal bekor qilindi.", reply_markup=get_user_main_kb())
 
 @dp.message(F.text == "🚪 Foydalanuvchi menyusi")
 async def back_user_kb(message: types.Message, state: FSMContext):
@@ -184,7 +186,7 @@ async def show_stats(message: types.Message):
     )
     await message.answer(text, parse_mode="HTML")
 
-# --- KINO QO'SHISH BOSQICHLARI ---
+# --- KINO QO'SHISH ---
 @dp.message(F.text == "➕ Kino qo'shish")
 async def start_add_movie(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMINS:
@@ -247,9 +249,7 @@ async def process_video(message: types.Message, state: FSMContext):
     }
 
     await message.answer(
-        f"✅ <b>Kino muvaffaqiyatli saqlandi!</b>\n\n"
-        f"🎬 <b>Nom:</b> {data['name']}\n"
-        f"🔢 <b>Kodi:</b> <code>{data['code']}</code>",
+        f"✅ <b>Kino saqlandi!</b>\n\n🎬 {data['name']}\n🔢 Kodi: <code>{data['code']}</code>",
         reply_markup=get_admin_kb(),
         parse_mode="HTML"
     )
@@ -273,7 +273,7 @@ async def delete_movie_finish(message: types.Message, state: FSMContext):
         await message.answer("❌ Bunday kodli kino topilmadi.", reply_markup=get_admin_kb())
     await state.clear()
 
-# --- KANALLAR BOSHQARUVI ---
+# --- KANALLARNI BOSHQARISH ---
 @dp.message(F.text == "📢 Kanallar")
 async def show_channels(message: types.Message):
     if message.from_user.id not in ADMINS:
@@ -285,11 +285,11 @@ async def show_channels(message: types.Message):
             [InlineKeyboardButton(text="🗑 Kanal o'chirish", callback_data="del_ch")]
         ]
     )
-    await message.answer(f"📢 <b>Majburiy kanallar ro'yxati:</b>\n\n{ch_list}", reply_markup=kb, parse_mode="HTML")
+    await message.answer(f"📢 <b>Majburiy kanallar:</b>\n\n{ch_list}", reply_markup=kb, parse_mode="HTML")
 
 @dp.callback_query(F.data == "add_ch")
 async def call_add_ch(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("Kanal usernamesini @ belgisi bilan yuboring (Masalan: @kanal):", reply_markup=cancel_kb)
+    await callback.message.answer("Kanal usernamesini @ bilan yuboring (Masalan: @kanal):", reply_markup=cancel_kb)
     await state.set_state(AdminActions.waiting_for_add_channel)
     await callback.answer()
 
@@ -298,14 +298,14 @@ async def process_add_ch(message: types.Message, state: FSMContext):
     ch = message.text.strip()
     if ch.startswith("@") and ch not in CHANNELS:
         CHANNELS.append(ch)
-        await message.answer(f"✅ {ch} kanali qo'shildi!", reply_markup=get_admin_kb())
+        await message.answer(f"✅ {ch} qo'shildi!", reply_markup=get_admin_kb())
     else:
-        await message.answer("Xatolik yoki kanal allaqachon mavjud.", reply_markup=get_admin_kb())
+        await message.answer("Xatolik yuz berdi yoki mavjud kanal.", reply_markup=get_admin_kb())
     await state.clear()
 
 @dp.callback_query(F.data == "del_ch")
 async def call_del_ch(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("O'chirmoqchi bo'lgan kanal usernamesini kiriting:", reply_markup=cancel_kb)
+    await callback.message.answer("O'chirmoqchi bo'lgan kanal usernamesini yozing:", reply_markup=cancel_kb)
     await state.set_state(AdminActions.waiting_for_del_channel)
     await callback.answer()
 
@@ -316,10 +316,10 @@ async def process_del_ch(message: types.Message, state: FSMContext):
         CHANNELS.remove(ch)
         await message.answer(f"✅ {ch} o'chirildi!", reply_markup=get_admin_kb())
     else:
-        await message.answer("Bunday kanal topilmadi.", reply_markup=get_admin_kb())
+        await message.answer("Kanal topilmadi.", reply_markup=get_admin_kb())
     await state.clear()
 
-# --- ADMINLAR BOSHQARUVI ---
+# --- ADMINLAR ---
 @dp.message(F.text == "👥 Adminlar")
 async def manage_admins(message: types.Message):
     if message.from_user.id not in ADMINS:
@@ -328,11 +328,11 @@ async def manage_admins(message: types.Message):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="➕ Admin qo'shish", callback_data="add_admin")]]
     )
-    await message.answer(f"👥 <b>Adminlar ro'yxati:</b>\n\n{adm_text}", reply_markup=kb, parse_mode="HTML")
+    await message.answer(f"👥 <b>Adminlar:</b>\n\n{adm_text}", reply_markup=kb, parse_mode="HTML")
 
 @dp.callback_query(F.data == "add_admin")
 async def add_admin_call(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("Yangi adminning Telegram ID raqamini yuboring:", reply_markup=cancel_kb)
+    await callback.message.answer("Yangi admin Telegram ID raqamini yuboring:", reply_markup=cancel_kb)
     await state.set_state(AdminActions.waiting_for_add_admin)
     await callback.answer()
 
@@ -344,17 +344,17 @@ async def process_admin_add(message: types.Message, state: FSMContext):
             ADMINS.append(new_id)
             await message.answer(f"✅ ID {new_id} admin qilindi!", reply_markup=get_admin_kb())
         else:
-            await message.answer("Bu foydalanuvchi allaqachon admin.", reply_markup=get_admin_kb())
+            await message.answer("Allaqachon admin.", reply_markup=get_admin_kb())
     else:
         await message.answer("Faqat raqam kiriting.", reply_markup=get_admin_kb())
     await state.clear()
 
-# --- XABAR YUBORISH (RASSILKA) ---
+# --- XABAR YUBORISH ---
 @dp.message(F.text == "✉️ Xabar yuborish")
 async def start_broadcast(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMINS:
         return
-    await message.answer("Barcha foydalanuvchilarga yuborilishi kerak bo'lgan xabarni yuboring:", reply_markup=cancel_kb)
+    await message.answer("Barchaga yuboriladigan xabarni kiriting:", reply_markup=cancel_kb)
     await state.set_state(AdminActions.waiting_for_broadcast)
 
 @dp.message(AdminActions.waiting_for_broadcast)
@@ -368,19 +368,17 @@ async def broadcast_send(message: types.Message, state: FSMContext):
             await asyncio.sleep(0.05)
         except Exception:
             pass
-    await message.answer(f"✅ Xabar {sent} ta foydalanuvchiga yuborildi!", reply_markup=get_admin_kb())
+    await message.answer(f"✅ {sent} ta foydalanuvchiga yuborildi!", reply_markup=get_admin_kb())
     await state.clear()
 
-# --- KINO BERISH (OBUNA TO'LIQ BLOKI BILAN) ---
+# --- KINO KODI ORQALI QIDIRISH VA QOLGAN MATNLAR ---
 @dp.message(F.text.regexp(r'^\d+$'))
 async def send_movie_by_code(message: types.Message):
     user_id = message.from_user.id
-    
-    # Har safar kino so'raganda ham obunani tekshiradi
     unsub = await check_channel_membership(user_id)
-    if unsub and user_id not in ADMINS:
+    if unsub:
         await message.answer(
-            "⚠️ <b>Kinoni tomosha qilish uchun oldin homiy kanallarga a'zo bo'ling!</b>\n\n"
+            "⚠️ <b>Kinoni ko'rish uchun oldin homiy kanalga obuna bo'ling!</b>\n\n"
             "<i>A'zo bo'lgach, «✅ TEKSHIRISH» tugmasini bosing:</i>",
             reply_markup=get_sub_keyboard(unsub),
             parse_mode="HTML"
@@ -391,11 +389,11 @@ async def send_movie_by_code(message: types.Message):
     if code in MOVIES:
         m = MOVIES[code]
         card = (
-            f"🎬 <b>Film nomi:</b> {m['title']}\n"
-            f"📝 <b>Tavsif:</b> {m.get('description', 'Mavjud emas')}\n"
-            f"📅 <b>Yili:</b> {m.get('year', 'Noma\'lum')}\n"
-            f"🌍 <b>Davlat:</b> {m.get('country', 'Noma\'lum')}\n"
-            f"🎭 <b>Janr:</b> {m.get('genre', 'Noma\'lum')}\n"
+            f"🎬 <b>Film:</b> {m['title']}\n"
+            f"📝 <b>Tavsif:</b> {m.get('description', '')}\n"
+            f"📅 <b>Yili:</b> {m.get('year', '')}\n"
+            f"🌍 <b>Davlat:</b> {m.get('country', '')}\n"
+            f"🎭 <b>Janr:</b> {m.get('genre', '')}\n"
             f"🔢 <b>Kodi:</b> <code>{code}</code>\n\n"
             f"📢 <b>Kanal:</b> @FORTIS_OKTO"
         )
@@ -404,60 +402,37 @@ async def send_movie_by_code(message: types.Message):
         else:
             await message.answer(card, parse_mode="HTML")
     else:
-        await message.answer(f"❌ <b>{code}</b> raqamli kino bazadan topilmadi.")
+        await message.answer(f"❌ <b>{code}</b> raqamli kino topilmadi.")
 
-# --- BOSHQA MATNLARNI HAM OBUNAGA TEKSHIRISH ---
 @dp.message(F.text)
-async def check_all_other_messages(message: types.Message):
+async def handle_other_text(message: types.Message):
     user_id = message.from_user.id
-    
-    # Agar foydalanuvchi obuna bo'lmagan bo'lsa, nima yozsa ham kanallarni ko'rsatadi
     unsub = await check_channel_membership(user_id)
-    if unsub and user_id not in ADMINS:
+    if unsub:
         await message.answer(
-            "⚠️ <b>Botdan to'liq foydalanish uchun kanallarga a'zo bo'lishingiz shart!</b>",
+            "⚠️ <b>Botdan to'liq foydalanish uchun homiy kanalga obuna bo'ling!</b>",
             reply_markup=get_sub_keyboard(unsub),
             parse_mode="HTML"
         )
         return
 
     if message.text == "🎬 Kino izlash":
-        await message.answer("🍿 Kinoni olish uchun uning kodini yuboring (masalan: <code>101</code>).", parse_mode="HTML")
+        await message.answer("🍿 Kino kodini yuboring (masalan: <code>101</code>).", parse_mode="HTML")
     elif message.text == "🔥 Top kinolar":
-        text = "🔥 <b>Eng sara kinolar:</b>\n\n"
+        text = "🔥 <b>Sara kinolar:</b>\n\n"
         for code, m in list(MOVIES.items())[:5]:
             text += f"• <code>{code}</code> — {m['title']} ({m.get('year', '')})\n"
         await message.answer(text, parse_mode="HTML")
     elif message.text == "ℹ️ Bot haqida":
-        await message.answer("🎬 <b>Kino Olami | Premyeralar</b>\nEng so'nggi premyera va kinolar boti!", parse_mode="HTML")
+        await message.answer("🎬 <b>Kino Olami | Premyeralar</b>\nEng so'nggi premyeralar boti!", parse_mode="HTML")
     else:
         await message.answer("Kino kodini yuboring (masalan: <code>101</code>).", parse_mode="HTML")
 
-# --- RENDER SERVERI ---
-async def handle_ping(request):
-    return web.Response(text="Bot is running!")
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
-async def main():
-    await start_web_server()
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
-# --- RENDER PORTI UCHUN SERVER ---
+# --- VEB SERVER VA ISHGA TUSHIRISH ---
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
 async def main():
-    # Veb-serverni fonda ishga tushirish
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
@@ -466,10 +441,9 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     
-    # Bot polling
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
+        
